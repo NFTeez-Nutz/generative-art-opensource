@@ -14,6 +14,7 @@ from input.config import (
     editionSize,
     startEditionFrom,
     rarityWeights,
+    obstructions
 )
 
 # saves the generated image to the output folder, using the edition count as the name
@@ -59,8 +60,8 @@ def generateMetadata(_dna, _edition, _attributesList):
 def getAttributeForElement(_element):
     selectedElement = _element['layer']['selectedElement']
     attribute = {
-        'name': selectedElement['name'],
-        'rarity': selectedElement['rarity']
+        'trait_type': selectedElement['property'],
+        'value': selectedElement['name']
     }
     return attribute
 
@@ -94,10 +95,8 @@ def drawElement(_element, _img):
 # drawing on a canvas
 def constructLayerToDna(_dna, _layers, _rarity):
     def f(layer, index):
-        # selectedElement = next(element for element in layer['elements'] if element['id'] == _dna[index])
         rarities = [layer['elements'][rarity] for rarity in layer['elements']]
         elementRarities = [element for elements in rarities for element in elements]
-        print(elementRarities)
         selectedElement = next(element for element in elementRarities if element['id'] == _dna[index])
         return {
             'position': layer['position'],
@@ -120,7 +119,6 @@ def getRandomRarity(_rarityOptions):
     for i in range(len(_rarityOptions)):
         percentCount += _rarityOptions[i]['percent']
         if percentCount >= randomPercent:
-            print(f"use random rarity {_rarityOptions[i]['id']}")
             return _rarityOptions[i]['id']
     return _rarityOptions[0]['id']
 
@@ -128,15 +126,33 @@ def getRandomRarity(_rarityOptions):
 # use a random part for each layer
 def createDna(_layers, _rarity):
     randNum = []
+    selectedElements = []
     _rarityWeight = next(rw for rw in rarityWeights if rw['value'] == _rarity)
     for layer in _layers:
-        num = math.floor(random.random() * len(layer['elementIdsForRarity'][_rarity]))
-        if _rarityWeight and layer['id'] in _rarityWeight['layerPercent']:
-            _rarityForLayer = getRandomRarity(_rarityWeight['layerPercent'][layer['id']])
-            num = math.floor(random.random() * len(layer['elementIdsForRarity'][_rarityForLayer]))
-            randNum.append(layer['elementIdsForRarity'][_rarityForLayer][num])
-        else:
-            randNum.append(layer['elementIdsForRarity'][_rarity][num])
+        obsd = True
+        while obsd:
+            obsd = False
+            id = 0
+            num = math.floor(random.random() * len(layer['elementIdsForRarity'][_rarity]))
+            if _rarityWeight and layer['id'] in _rarityWeight['layerPercent']:
+                _rarityForLayer = getRandomRarity(_rarityWeight['layerPercent'][layer['id']])
+                num = math.floor(random.random() * len(layer['elementIdsForRarity'][_rarityForLayer]))
+                id = layer['elementIdsForRarity'][_rarityForLayer][num]
+            else:
+                id = layer['elementIdsForRarity'][_rarity][num]
+            
+            # Check for obstructions
+            rarities = [layer['elements'][rarity] for rarity in layer['elements']]
+            elementRarities = [element for elements in rarities for element in elements]
+            nextElement = next(element for element in elementRarities if element['id'] == id)['name']
+            for obs in obstructions:
+                if(nextElement in obs and all(x in selectedElements+[nextElement] for x in obs)):
+                    print(f"obs with {obs} found")
+                    obsd = True
+                    break
+        selectedElements.append(nextElement)
+        randNum.append(id)
+
     return randNum
 
 # holds which rarity should be used for which image in edition
@@ -145,13 +161,14 @@ rarityForEdition = []
 # get the rarity for the image by edition number that should be generated
 def getRarity(_editionCount):
     if not len(rarityForEdition):
+        rarityWeights.sort(key= lambda r: r['from'], reverse=True) # Honor rarityWeights
         for rarityWeight in rarityWeights:
             for i in range(rarityWeight['from'], rarityWeight['to'] + 1):
                 rarityForEdition.append(rarityWeight['value'])
     return rarityForEdition[editionSize  - _editionCount]
 
 def writeMetaData(_data):
-    with open("./output/_metadata.json", 'w') as f:
+    with open("./output/_metadata.json", 'a') as f:
         f.write(_data)
 
 # holds which dna has already been used during generation
@@ -159,6 +176,118 @@ dnaListByRarity = {}
 
 # holds metadata for all NFTs
 metadataList = []
+dnaList = []
+
+from multiprocessing import Pool, Lock, Manager
+import os
+
+lock = None
+
+# Multithreaded implementation
+def startCreatingMulti(_max_processes=None):
+    if not _max_processes:
+        _max_processes = os.cpu_count()
+    max_processes = _max_processes
+
+    global lock
+    lock = Lock()
+
+    print('##################')
+    print('# Generative Art')
+    print('# - Create your NFT collection')
+    print('###########')
+
+    print()
+    print('start creating NFTs.')
+
+    # clear meta data from previous run
+    writeMetaData("")
+
+    # prepare dnaList object
+    for rarityWeight in rarityWeights:
+        dnaListByRarity[rarityWeight['value']] = []
+
+
+    metadataList = []
+    # Generate art, regenerate any duplicates found
+    duplicates = True
+    ids = range(startEditionFrom,startEditionFrom+editionSize)
+    while duplicates:
+        duplicates = False
+        # Start processes
+        with Pool(max_processes) as pool:
+            results = pool.map(creator, ids)
+
+        newMetadataList, newDnaList = zip(*results)
+        metadataList = metadataList + list(newMetadataList)
+
+        # Check for duplicates
+        nonunique_ids = []
+        for dna in list(newDnaList):
+            id = dna['id']
+            rarity = dna['rarity']
+            newDna = dna['dna']
+            if not isDnaUnique(dnaListByRarity[rarity], newDna):
+                nonunique_ids.append(id)
+                duplicates = True
+            else:
+                dnaListByRarity[rarity].append(newDna)
+        ids = nonunique_ids
+
+    writeMetaData(json.dumps(metadataList))
+
+# Worker thread function
+def creator(_id):
+    editionCount = _id
+    print('-----------------')
+    print(f'creating NFT {editionCount} of {editionSize}')
+
+    # get rarity from to config to create NFT as
+    rarity = getRarity(editionCount)
+    # print(f'- rarity: {rarity}')
+
+    # calculate the NFT dna by getting a random part for each layer/feature 
+    # based on the ones available for the given rarity to use during generation
+    newDna = createDna(layers, rarity)
+    while not isDnaUnique(dnaListByRarity[rarity], newDna):
+        # recalculate dna as this has been used before.
+        print(f"found duplicate DNA {'-'.join(newDna)} recalculate...")
+        newDna = createDna(layers, rarity)
+    
+    # print(f"- dna: {'-'.join(newDna)}")
+
+    # propagate information about required layer contained within config into a mapping object
+    # = prepare for drawing
+    results = constructLayerToDna(newDna, layers, rarity)
+    loadedElements = []
+
+    # load all images to be used by canvas
+    for layer in results:
+        loadedElements.append(loadLayerImg(layer))
+
+    # elements are loaded asynchronously
+    # -> await for all to be available before drawing the image
+    elementArray = loadedElements
+    img = Image.new('RGB', (height, width), (255, 255, 255))
+    drawBackground(img)
+    attributesList = []
+    for element in elementArray:
+        drawElement(element, img)
+        attributesList.append(getAttributeForElement(element))
+    # add an image signature as the edition count to the top left of the image
+    # signImage(f'#{editionCount}', img)
+    nftMetadata = generateMetadata(newDna, editionCount, attributesList)
+    # write the image to the output directory
+    with lock:
+        saveImage(editionCount, img)
+    print('- metadata: ' + json.dumps(nftMetadata) + '\n- edition ' + str(editionCount) + ' created.\n')
+    dnaListByRarity[rarity].append(newDna)
+    tokenData = {
+        'id' : _id,
+        'rarity' : rarity,
+        'dna' : newDna
+    }
+    return (nftMetadata,tokenData)
 
 # Create generative art by using the canvas api
 def startCreating():
@@ -195,7 +324,7 @@ def startCreating():
             print(f"found duplicate DNA {'-'.join(newDna)} recalculate...")
             newDna = createDna(layers, rarity)
         
-        print("- dna: {newDna.join('-')}")
+        print(f"- dna: {'-'.join(newDna)}")
 
         # propagate information about required layer contained within config into a mapping object
         # = prepare for drawing
@@ -216,7 +345,7 @@ def startCreating():
             drawElement(element, img)
             attributesList.append(getAttributeForElement(element))
         # add an image signature as the edition count to the top left of the image
-        signImage(f'#{editionCount}', img)
+        # signImage(f'#{editionCount}', img)
         # write the image to the output directory
         saveImage(editionCount, img)
         nftMetadata = generateMetadata(newDna, editionCount, attributesList)
@@ -229,4 +358,5 @@ def startCreating():
     writeMetaData(json.dumps(metadataList))
 
 # Initiate code
-startCreating()
+# startCreating()
+startCreatingMulti()

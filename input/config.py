@@ -2,6 +2,7 @@
 
 from os import listdir, path
 from os.path import isfile, join
+import random
 
 # /**************************************************************
 # * UTILITY FUNCTIONS
@@ -32,10 +33,12 @@ def getElements(_path, _elementCount=None):
     filenames = [f for f in listdir(_path) if isfile(join(_path, f)) and ".png" in f]
     elements = []
     for f in filenames:
+        property = _path.split('/')[-2]
         elements.append({
             'id': _elementCount,
             'name': cleanName(f),
-            'path': f"{_path}/{f}"
+            'path': f"{_path}/{f}",
+            'property': f"{property}"
         })
     return elements
 
@@ -117,10 +120,28 @@ editionDnaPrefix = 0
 
 # create required weights
 # for each weight, call 'addRarity' with the id and from which to which element this rarity should be applied
-rarityWeights = [
-  addRarity('super_rare', 1, 1),
-  addRarity('rare', 2, 5),
-  addRarity('original', 5, 10)
+
+# Randomly distribute rarities
+rarityNums = {
+    'super_rare' : 1,
+    'rare' : 4,
+    'original' : 5
+}
+tokenCounts = [*range(startEditionFrom,startEditionFrom + editionSize)]
+rarityWeights = []
+assert(editionSize == sum(rarityNums.values()))
+for rarity in rarityNums:
+    for _ in range(rarityNums[rarity]):
+        # Get random index of tokenCounts
+        i = random.randint(0,(len(tokenCounts)-1))
+        id = tokenCounts.pop(i)
+        rarityWeights.append(addRarity(rarity,id,id))
+        print(rarity, id)
+
+# combinations to avoid, add combinations of assets as lists of asset names
+obstructions = [
+    ["grey eye ball","cyan small"],
+    ["high bottom","purple big rare"],
 ]
 
 # create required layers
